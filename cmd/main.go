@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"os"
 	"runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
-	"sigs.k8s.io/controller-runtime/pkg/config/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"strconv"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -26,21 +27,22 @@ func main() {
 
 	var log = logf.Log.WithName("builder-examples")
 
-	// 基于此可定义多个goroutine来 Reconcile()
-	mgr, err := manager.New(config.GetConfigOrDie(), manager.Options{
-		Controller: v1alpha1.ControllerConfigurationSpec{GroupKindConcurrency: map[string]int{"ReplicaSet.apps": 3}, CacheSyncTimeout: nil},
-	})
+	mgr, err := manager.New(config.GetConfigOrDie(), manager.Options{})
 	if err != nil {
 		log.Error(err, "could not create manager")
 		os.Exit(1)
 	}
 
+	deleteEventFilter := predicate.Funcs{
+		DeleteFunc: func(deleteEvent event.DeleteEvent) bool {
+			return deleteEvent.Object.GetDeletionTimestamp() != nil
+		},
+	}
 	err = builder.
-		ControllerManagedBy(mgr).  // Create the ControllerManagedBy
-		For(&appsv1.ReplicaSet{}). // ReplicaSet is the Application API
-		Owns(&corev1.Pod{}).       // ReplicaSet owns Pods created by it
-		/////////WithOptions(controller.Options{MaxConcurrentReconciles: 2}).
-		Complete(&ReplicaSetReconciler{})
+		ControllerManagedBy(mgr). // Create the ControllerManagedBy
+		For(&corev1.Event{}).
+		WithEventFilter(deleteEventFilter). // Filter Event
+		Complete(&EventReconciler{})
 	if err != nil {
 		log.Error(err, "could not create controller")
 		os.Exit(1)
@@ -52,8 +54,8 @@ func main() {
 	}
 }
 
-// ReplicaSetReconciler is a simple ControllerManagedBy example implementation.
-type ReplicaSetReconciler struct {
+// EventReconciler is a simple ControllerManagedBy example implementation.
+type EventReconciler struct {
 	client.Client
 }
 
@@ -64,31 +66,39 @@ type ReplicaSetReconciler struct {
 // * Read the ReplicaSet
 // * Read the Pods
 // * Set a Label on the ReplicaSet with the Pod count.
-func (a *ReplicaSetReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+func (a *EventReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 
-	rs := &appsv1.ReplicaSet{}
-	err := a.Get(ctx, req.NamespacedName, rs)
+	fmt.Printf("the NamespaceName is %v\n", req.NamespacedName)
+	event := &corev1.Event{}
+	err := a.Get(ctx, req.NamespacedName, event)
+
+	// 默认把Delete 事件的对象也会被放入队列，此时实际已Get 不到此实际对象
+	if errors.IsNotFound(err) {
+		fmt.Printf("%v not found, return\n", req.NamespacedName)
+		return reconcile.Result{}, nil
+	}
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	fmt.Printf("the new event is %v\n", event.Name)
 
-	pods := &corev1.PodList{}
-	err = a.List(ctx, pods, client.InNamespace(req.Namespace), client.MatchingLabels(rs.Spec.Template.Labels))
-	if err != nil {
-		return reconcile.Result{}, err
-	}
+	/*	fmt.Printf("list event ...")
+		events := &corev1.EventList{}
+		err = a.List(ctx, events, client.InNamespace(req.Namespace))
+		if err != nil {
+			return reconcile.Result{}, err
+		}
 
-	rs.Labels["pod-count"] = fmt.Sprintf("%v", len(pods.Items))
-	err = a.Update(ctx, rs)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-	fmt.Sprintf("%d goroutine Reconcile ...", GetGID())
+		fmt.Printf("%d goroutine Reconcile ...\n", GetGID())
+		for index,v := range events.Items{
+			fmt.Printf("the %d event list is %v\n", index, v.Name)
+		}
+		fmt.Printf("\n\n\n\n\n")*/
 
 	return reconcile.Result{}, nil
 }
 
-func (a *ReplicaSetReconciler) InjectClient(c client.Client) error {
+func (a *EventReconciler) InjectClient(c client.Client) error {
 	a.Client = c
 	return nil
 }
