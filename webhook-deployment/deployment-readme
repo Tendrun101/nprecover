@@ -1,0 +1,17 @@
+
+参考 examples/builtins/main.go添加的demo webhook
+
+集群外部署方式，故在 clientConfig 中配置的是url，同时为了简化测试 直接使用了kubeconfig中的中的 certificate-authority-data 字段
+
+同时复用了已有的crt 和 key
+cp /etc/kubernetes/ssl/apiserver.crt /tmp/k8s-webhook-server/serving-certs/tls.crt
+cp /etc/kubernetes/ssl/apiserver.key /tmp/k8s-webhook-server/serving-certs/tls.key
+
+[root@node1 webhook]# ll /tmp/k8s-webhook-server/serving-certs/
+total 8
+-rw-r--r-- 1 root root 1363 Feb 14 11:17 tls.crt
+-rw-r--r-- 1 root root 1679 Feb 14 11:17 tls.key
+
+如不指定目录，container-runtime 中默认会使用 /tmp/k8s-webhook-server/serving-certs/tls.crt  和 /tmp/k8s-webhook-server/serving-certs/tls.key
+
+之后直接启动编译的二进制即可测试此webhook

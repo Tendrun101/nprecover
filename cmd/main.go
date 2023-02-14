@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"net/http"
 	"os"
 	"runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -13,6 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"strconv"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -22,12 +26,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+// podAnnotator annotates Pods
+type podAnnotator struct {
+	Client  client.Client
+	decoder *admission.Decoder
+}
+
 func main() {
 	logf.SetLogger(zap.New())
 
 	var log = logf.Log.WithName("builder-examples")
 
-	mgr, err := manager.New(config.GetConfigOrDie(), manager.Options{})
+	mgr, err := manager.New(config.GetConfigOrDie(), manager.Options{Namespace: "default"})
 	if err != nil {
 		log.Error(err, "could not create manager")
 		os.Exit(1)
@@ -47,6 +57,13 @@ func main() {
 		log.Error(err, "could not create controller")
 		os.Exit(1)
 	}
+
+	// Setup webhooks
+	log.Info("setting up webhook server")
+	hookServer := mgr.GetWebhookServer()
+
+	log.Info("registering webhooks to the webhook server")
+	hookServer.Register("/mutate-v1-pod", &webhook.Admission{Handler: &podAnnotator{Client: mgr.GetClient()}})
 
 	if err := mgr.Start(signals.SetupSignalHandler()); err != nil {
 		log.Error(err, "could not start manager")
@@ -110,4 +127,35 @@ func GetGID() uint64 {
 	b = b[:bytes.IndexByte(b, ' ')]
 	n, _ := strconv.ParseUint(string(b), 10, 64)
 	return n
+}
+
+//Handle podAnnotator adds an annotation to every incoming pods.
+func (a *podAnnotator) Handle(ctx context.Context, req admission.Request) admission.Response {
+	pod := &corev1.Pod{}
+
+	err := a.decoder.Decode(req, pod)
+	if err != nil {
+		return admission.Errored(http.StatusBadRequest, err)
+	}
+
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations["example-mutating-admission-webhook"] = "foo"
+
+	marshaledPod, err := json.Marshal(pod)
+	if err != nil {
+		return admission.Errored(http.StatusInternalServerError, err)
+	}
+
+	return admission.PatchResponseFromRaw(req.Object.Raw, marshaledPod)
+}
+
+// podAnnotator implements admission.DecoderInjector.
+// A decoder will be automatically injected.
+
+// InjectDecoder injects the decoder.
+func (a *podAnnotator) InjectDecoder(d *admission.Decoder) error {
+	a.decoder = d
+	return nil
 }
